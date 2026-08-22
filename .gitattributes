@@ -1,0 +1,6 @@
+# Keep the dist archive to what a consumer actually runs: src/, public/, bin/,
+# database/, config.php. Tests and their fixtures are large (the smoke suites
+# carry pre-Migrator database fixtures) and no installed copy runs them.
+/.gitattributes   export-ignore
+/tests            export-ignore
+/phpunit.xml.dist export-ignore

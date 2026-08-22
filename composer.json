@@ -1,0 +1,61 @@
+{
+  "name": "cliqthemes/log-lens-core",
+  "description": "Fast, local-first log dashboard and error tracker for Laravel, Horizon, nginx, and console logs.",
+  "type": "library",
+  "keywords": [
+    "logs",
+    "log-viewer",
+    "error-tracking",
+    "error-monitoring",
+    "self-hosted",
+    "laravel",
+    "horizon",
+    "nginx",
+    "sqlite"
+  ],
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "CliqThemes"
+    }
+  ],
+  "require": {
+    "php": "^8.2",
+    "ext-json": "*",
+    "ext-pdo": "*",
+    "ext-pdo_sqlite": "*"
+  },
+  "suggest": {
+    "ext-curl": "Required only for outbound HTTP: the Linear, Alerting, and HTTP-ingest client plugins. The core dashboard and log ingestion work without it.",
+    "ext-pdo_pgsql": "Only for the opt-in Postgres driver (LOG_LENS_DB_DRIVER=pgsql). SQLite is the default and needs nothing extra.",
+    "ext-pdo_mysql": "Only for the opt-in MySQL driver (LOG_LENS_DB_DRIVER=mysql). SQLite is the default and needs nothing extra."
+  },
+  "autoload": {
+    "psr-4": {
+      "LogLens\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "LogLens\\Tests\\": "tests/phpunit/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "test:coverage": "phpunit --coverage-clover=build/coverage/clover.xml --coverage-text",
+    "coverage:gate": "php tests/coverage-gate.php",
+    "lint": "find src public bin tests database -name '*.php' -print0 | xargs -0 -n1 php -l"
+  },
+  "extra": {
+    "branch-alias": {
+      "dev-main": "0.1.x-dev"
+    }
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "sort-packages": true
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.5"
+  }
+}

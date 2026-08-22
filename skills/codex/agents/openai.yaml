@@ -1,0 +1,4 @@
+interface:
+  display_name: "Log Lens Issues for Codex"
+  short_description: "Fix Log Lens issues in the active workspace"
+  default_prompt: "Use $log-lens-issues-codex to fix the top three unresolved Log Lens issues in this application workspace and update each status after validation."
