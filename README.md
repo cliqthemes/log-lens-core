@@ -96,7 +96,7 @@ composer lint
 The cross-engine smoke suites under `tests/smoke/` need a live Postgres or MySQL
 (or, for the two SQLite ones, nothing at all) — see their file headers.
 
-MIT licensed. Release history:
+MIT licensed. Release history: [CHANGELOG.md](CHANGELOG.md) and
 [releases](https://github.com/cliqthemes/log-lens-core/releases). Bugs, requests,
 and security advisories for both packages go to
 [cliqthemes/log-lens](https://github.com/cliqthemes/log-lens/issues).
