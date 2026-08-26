@@ -29,9 +29,15 @@ If the current workspace clearly does not contain the logged application, search
 
 ## Resolve the Log Lens origin
 
-Resolve the base URL in this order:
+First check whether `TARGET_PROJECT_ROOT` is a Laravel app with Log Lens mounted in-process, rather than a separate standalone/Composer install: look for `vendor/cliqthemes/log-lens` (the Laravel adapter — distinct from `vendor/cliqthemes/log-lens-core`, which every Laravel install pulls in as a dependency regardless of whether the dashboard is actually mounted) alongside an `artisan` file. When present:
 
-1. Resolve this `SKILL.md` to its real path, following a user-level symlink when present. The skill ships inside the engine, at `<LOG_LENS>/skills/claude/SKILL.md`, so walk up two directories to the engine root and read `<LOG_LENS>/config.php`. `<LOG_LENS>` is a standalone install, `vendor/cliqthemes/log-lens-core` in a Composer project, or `packages/core` in the development monorepo — the same two-directory walk in every case. Do not search for `config.php` inside `TARGET_PROJECT_ROOT`.
+- The base URL is `{APP_URL}{route_prefix}`, e.g. `https://app.test/log-lens`. Read `APP_URL` from that app's `.env`; read `route_prefix` from `config/log-lens.php` if published, default `log-lens` otherwise.
+- Do not read `vendor/cliqthemes/log-lens-core/config.php` for the URL — that file is the core engine's own shipped defaults and is never what a Laravel-mounted install actually serves from.
+- Skip straight to "Authenticate when a key is configured" below (its Laravel branch), then start making requests.
+
+Otherwise (standalone or a non-Laravel Composer install), resolve the base URL in this order:
+
+1. Resolve this `SKILL.md` to its real path, following a user-level symlink when present. The skill ships inside the engine, at `<LOG_LENS>/skills/claude/SKILL.md`, so walk up two directories to the engine root and read `<LOG_LENS>/config.php`. `<LOG_LENS>` is a standalone install or `vendor/cliqthemes/log-lens-core` in a non-Laravel Composer project, or `packages/core` in the development monorepo — the same two-directory walk in every case. Do not search for `config.php` inside `TARGET_PROJECT_ROOT`.
 2. When that Log Lens config exists, require it and read its returned `LOG_LENS_URL` value. A safe read is:
    `php -r '$c=require $argv[1]; echo $c["LOG_LENS_URL"] ?? "";' "/absolute/path/to/log-lens/config.php"`.
 3. Use the `LOG_LENS_URL` environment variable when the Log Lens config file is not accessible.
@@ -43,7 +49,13 @@ Accept only a scalar HTTP(S) URL from config. Remove a trailing slash before app
 
 ## Authenticate when a key is configured
 
-Log Lens may require an API key. Resolve it once, before the first request:
+**Laravel-mounted install** (detected above): there is no `auth.token`/core API key in this mode by default — access is gated by the host app's own auth (`LogLens::authorized()` in `LogLens\Laravel\LogLens`), which denies everything outside the `local` environment unless configured otherwise. In order:
+
+1. If that app's `.env` sets `LOG_LENS_AGENT_TOKEN`, send it as `X-Log-Lens-Agent-Token: <token>` on every request (API requests only — this token never grants the dashboard's HTML shell, so don't request it without `?api=...`).
+2. Otherwise, if that app's `.env` has `APP_ENV=local`, send no auth header — access is open by default in that environment.
+3. Otherwise a human has to grant access first (a `LogLens::auth()` callback the skill has no credential for). A `403` here means ask the user for an agent token or to run `php artisan log-lens:install` and generate one, rather than guessing a header.
+
+**Standalone or non-Laravel Composer install**: Log Lens may require an API key. Resolve it once, before the first request:
 
 1. Read `LOG_LENS_TOKEN` from the environment.
 2. Otherwise read `auth.token` from the Log Lens config:
