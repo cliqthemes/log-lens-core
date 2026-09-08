@@ -270,6 +270,13 @@ return [
         // GraphQL endpoint and per-request timeout (seconds).
         'endpoint' => 'https://api.linear.app/graphql',
         'timeout' => 15,
+        // Ceiling on how much one sync() call pulls (sync_max_pages *
+        // sync_page_size issues) before it stops and persists a resumable
+        // cursor for the next call — a workspace with more matches than that
+        // needs several calls (manual "Sync now" clicks, or a webhook) to
+        // fully backfill; every call afterwards is incremental.
+        'sync_max_pages' => 5,
+        'sync_page_size' => 50,
     ],
 
     'retention' => [

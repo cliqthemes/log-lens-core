@@ -54,10 +54,22 @@ final class LinearSettingsService
             'assigned_to_me' => (bool) ($data['assigned_to_me'] ?? false),
             'assignees' => $this->normalizeAssignees($data['assignees'] ?? []),
             'status_writeback' => (bool) ($data['status_writeback'] ?? false),
+            // Default for the per-status-change "also comment" choice a caller
+            // (e.g. the Inspector's checkbox) makes each time — a persisted
+            // preference, not itself enforced anywhere: whoever changes status
+            // still decides, and this only seeds where they start from.
+            'status_writeback_comment' => (bool) ($data['status_writeback_comment'] ?? true),
             'team_key' => trim((string) ($data['team_key'] ?? '')),
             'api_key_token' => (string) ($data['api_key_token'] ?? ''),
             'webhook_secret_token' => (string) ($data['webhook_secret_token'] ?? ''),
             'updated_at' => (string) ($data['updated_at'] ?? ''),
+            // Resumable-pull bookkeeping (never user-editable; see syncState()/
+            // recordSyncProgress()) — kept in this same blob for simplicity
+            // rather than a second settings key.
+            'sync_cursor' => (string) ($data['sync_cursor'] ?? ''),
+            'backfill_complete' => (bool) ($data['backfill_complete'] ?? false),
+            'synced_through' => (string) ($data['synced_through'] ?? ''),
+            'sync_floor' => (string) ($data['sync_floor'] ?? ''),
         ];
     }
 
@@ -74,6 +86,7 @@ final class LinearSettingsService
             'assigned_to_me' => $raw['assigned_to_me'],
             'assignees' => $raw['assignees'],
             'status_writeback' => $raw['status_writeback'],
+            'status_writeback_comment' => $raw['status_writeback_comment'],
             'team_key' => $raw['team_key'],
             'api_key_configured' => $source !== 'none',
             'api_key_source' => $source,
@@ -83,6 +96,13 @@ final class LinearSettingsService
             'at_rest_encrypted' => SecretBox::secured(),
             'env_key_locked' => $envKey !== '',
             'updated_at' => $raw['updated_at'],
+            'sync' => [
+                // false until the very first full pull has drained every page;
+                // from then on every sync() is incremental (updated-since only).
+                'backfill_complete' => $raw['backfill_complete'],
+                'synced_through' => $raw['synced_through'] !== '' ? $raw['synced_through'] : null,
+                'in_progress' => $raw['sync_cursor'] !== '',
+            ],
         ];
     }
 
@@ -94,6 +114,13 @@ final class LinearSettingsService
     public function update(array $input): array
     {
         $raw = $this->raw();
+        // Any change to which issues match invalidates the resumable cursor and
+        // high-water mark — a cursor/floor recorded under the old selection
+        // doesn't mean anything under the new one, so start the pull over.
+        $filterKeys = ['labels', 'assigned_to_me', 'assignees', 'team_key'];
+        if (array_intersect($filterKeys, array_keys($input)) !== []) {
+            $this->resetSyncState($raw);
+        }
 
         if (array_key_exists('labels', $input)) {
             if (!is_array($input['labels'])) {
@@ -112,6 +139,9 @@ final class LinearSettingsService
         }
         if (array_key_exists('status_writeback', $input)) {
             $raw['status_writeback'] = $this->boolean($input['status_writeback']);
+        }
+        if (array_key_exists('status_writeback_comment', $input)) {
+            $raw['status_writeback_comment'] = $this->boolean($input['status_writeback_comment']);
         }
         if (array_key_exists('team_key', $input)) {
             $teamKey = strtoupper(trim((string) $input['team_key']));
@@ -160,6 +190,46 @@ final class LinearSettingsService
     public function statusWritebackEnabled(): bool
     {
         return $this->isEnabled() && $this->raw()['status_writeback'];
+    }
+
+    /**
+     * The resumable-pull bookkeeping {@see LinearSyncService::sync()} reads at
+     * the start of every call.
+     *
+     * @return array{cursor:?string,backfill_complete:bool,synced_through:?string,sync_floor:?string}
+     */
+    public function syncState(): array
+    {
+        $raw = $this->raw();
+        return [
+            'cursor' => $raw['sync_cursor'] !== '' ? $raw['sync_cursor'] : null,
+            'backfill_complete' => $raw['backfill_complete'],
+            'synced_through' => $raw['synced_through'] !== '' ? $raw['synced_through'] : null,
+            'sync_floor' => $raw['sync_floor'] !== '' ? $raw['sync_floor'] : null,
+        ];
+    }
+
+    /** Persist where the next sync() call should resume from. */
+    public function recordSyncProgress(?string $cursor, bool $backfillComplete, ?string $syncedThrough, ?string $syncFloor): void
+    {
+        $raw = $this->raw();
+        $raw['sync_cursor'] = $cursor ?? '';
+        $raw['backfill_complete'] = $backfillComplete;
+        $raw['synced_through'] = $syncedThrough ?? '';
+        $raw['sync_floor'] = $syncFloor ?? '';
+        $this->db->execute(
+            Dialects::active()->keyValueUpsert(),
+            [self::SETTING_KEY, json_encode($raw, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)],
+        );
+    }
+
+    /** @param array<string,mixed> $raw */
+    private function resetSyncState(array &$raw): void
+    {
+        $raw['sync_cursor'] = '';
+        $raw['backfill_complete'] = false;
+        $raw['synced_through'] = '';
+        $raw['sync_floor'] = '';
     }
 
     public function hasApiKey(): bool

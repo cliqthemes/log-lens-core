@@ -89,7 +89,12 @@ interface PluginContract
      * implementations should catch their own exceptions and return null
      * rather than let one escape. No-op by default via {@see AbstractPlugin}.
      *
+     * $comment lets the caller decide, per status-change, whether the
+     * write-back should also leave a comment (e.g. an "Also comment on
+     * Linear" checkbox next to the status control) or move the linked issue's
+     * state silently.
+     *
      * @return array<string,mixed>|null
      */
-    public function onIssueStatusChanged(PDO $db, int $groupId, string $status, string $note): ?array;
+    public function onIssueStatusChanged(PDO $db, int $groupId, string $status, string $note, bool $comment = true): ?array;
 }

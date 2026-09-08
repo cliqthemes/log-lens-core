@@ -51,13 +51,17 @@ final class LinearClient
     }
 
     /**
-     * Fetch every issue matching an IssueFilter, following pagination up to a
-     * safety ceiling on pages. Returns Linear's raw issue nodes.
+     * Fetch one bounded batch of issues matching an IssueFilter, resuming from
+     * an optional cursor (a prior call's `next_cursor`). A workspace with more
+     * matches than `$maxPages * $pageSize` is never pulled in one call — the
+     * caller persists `next_cursor` and calls again to continue, rather than
+     * this method silently truncating the result (see {@see
+     * LinearSyncService::sync()}, which is what actually resumes across calls).
      *
      * @param array<string,mixed> $filter
-     * @return list<array<string,mixed>>
+     * @return array{issues:list<array<string,mixed>>,next_cursor:?string,has_more:bool}
      */
-    public function fetchIssues(array $filter, int $maxPages = 20, int $pageSize = 50): array
+    public function fetchIssues(array $filter, ?string $after = null, int $maxPages = 5, int $pageSize = 50): array
     {
         $query = <<<'GQL'
 query Issues($filter: IssueFilter, $after: String, $first: Int) {
@@ -74,11 +78,12 @@ query Issues($filter: IssueFilter, $after: String, $first: Int) {
 }
 GQL;
         $issues = [];
-        $after = null;
+        $cursor = $after;
+        $hasMore = false;
         for ($page = 0; $page < $maxPages; $page++) {
             $data = $this->query($query, [
                 'filter' => (object) $filter,
-                'after' => $after,
+                'after' => $cursor,
                 'first' => max(1, min(100, $pageSize)),
             ]);
             $connection = $data['issues'] ?? [];
@@ -89,11 +94,14 @@ GQL;
             }
             $pageInfo = $connection['pageInfo'] ?? [];
             if (empty($pageInfo['hasNextPage']) || empty($pageInfo['endCursor'])) {
+                $hasMore = false;
+                $cursor = null;
                 break;
             }
-            $after = (string) $pageInfo['endCursor'];
+            $cursor = (string) $pageInfo['endCursor'];
+            $hasMore = true;
         }
-        return $issues;
+        return ['issues' => $issues, 'next_cursor' => $hasMore ? $cursor : null, 'has_more' => $hasMore];
     }
 
     /**

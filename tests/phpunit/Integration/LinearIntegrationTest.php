@@ -121,6 +121,21 @@ final class LinearIntegrationTest extends TestCase
         self::assertSame(['Billing', 'urgent'], $stored['labels']);
     }
 
+    public function testStatusWriteBackCommentDefaultsToOnAndPersistsExplicitly(): void
+    {
+        $pdo = $this->makeDatabase()->pdo;
+        $settings = new LinearSettingsService($pdo);
+        // A fresh workspace defaults to commenting - this is only a seed for
+        // the per-status-change checkbox, not itself enforced anywhere.
+        self::assertTrue($settings->configuration()['status_writeback_comment']);
+
+        $updated = $settings->update(['status_writeback_comment' => false]);
+        self::assertFalse($updated['status_writeback_comment']);
+        // Persisted, not just returned in-memory - a fresh instance over the
+        // same connection reads it back the same way.
+        self::assertFalse((new LinearSettingsService($pdo))->configuration()['status_writeback_comment']);
+    }
+
     public function testPullMapsIssuesAndMirrorsLabels(): void
     {
         $pdo = $this->makeDatabase()->pdo;
@@ -201,6 +216,128 @@ final class LinearIntegrationTest extends TestCase
         $filter = (string) json_encode($captured['filter']);
         self::assertStringContainsString('teammate@example.test', $filter);
         self::assertStringContainsString('b1c2d3e4-user-id', $filter);
+    }
+
+    public function testSyncPaginatesAcrossCallsThenBecomesIncremental(): void
+    {
+        $pdo = $this->makeDatabase()->pdo;
+        $issues = $this->issues();
+        $seenAfter = [];
+        $seenFilters = [];
+        $transport = static function (string $endpoint, array $headers, string $body) use (&$seenAfter, &$seenFilters, $issues): array {
+            $payload = json_decode($body, true);
+            $query = (string) ($payload['query'] ?? '');
+            $variables = $payload['variables'] ?? [];
+            if (str_contains($query, 'issues(')) {
+                $after = $variables['after'] ?? null;
+                $seenAfter[] = $after;
+                $seenFilters[] = $variables['filter'] ?? null;
+                if ($after === null) {
+                    $data = ['issues' => ['pageInfo' => ['hasNextPage' => true, 'endCursor' => 'cursor-1'], 'nodes' => [$issues[0]]]];
+                } elseif ($after === 'cursor-1') {
+                    $data = ['issues' => ['pageInfo' => ['hasNextPage' => false, 'endCursor' => null], 'nodes' => [$issues[1]]]];
+                } else {
+                    $data = ['issues' => ['pageInfo' => ['hasNextPage' => false, 'endCursor' => null], 'nodes' => []]];
+                }
+            } else {
+                $data = [];
+            }
+            return ['status' => 200, 'body' => (string) json_encode(['data' => $data])];
+        };
+        $settings = $this->storedSettings($pdo);
+        // Force a one-page-per-call ceiling so two issues need two sync()
+        // calls to fully backfill — exercises the resumable cursor. (Set
+        // after storedSettings(), which itself reloads Config.)
+        Config::load(['linear' => ['secret' => 'deployment-secret', 'sync_max_pages' => 1, 'sync_page_size' => 1]]);
+        $client = new LinearClient('stored-linear-key', LinearClient::DEFAULT_ENDPOINT, 15, $transport);
+        $sync = new LinearSyncService($pdo, $settings, $client);
+
+        $first = $sync->sync();
+        self::assertSame('backfill', $first['phase']);
+        self::assertTrue($first['has_more']);
+        self::assertFalse($first['backfill_complete']);
+        self::assertSame(1, $first['pulled']);
+        self::assertNull($seenAfter[0], 'The first call starts from scratch.');
+
+        $second = $sync->sync();
+        self::assertSame('backfill', $second['phase'], 'Still the backfill pass — just its final page.');
+        self::assertFalse($second['has_more']);
+        self::assertTrue($second['backfill_complete']);
+        self::assertSame(1, $second['pulled']);
+        self::assertSame('cursor-1', $seenAfter[1], 'The second call resumes from the cursor the first call persisted.');
+
+        self::assertSame(2, (new IssueQueryRepository($pdo))->list(['origin' => 'linear'], 20, 1, false, false)['total']);
+
+        $third = $sync->sync();
+        self::assertSame('incremental', $third['phase'], 'Once fully backfilled, every later sync is incremental.');
+        self::assertArrayHasKey('and', $seenFilters[2], 'Incremental syncs AND an updatedAt bound onto the configured filter.');
+    }
+
+    public function testStatusWriteBackCommentIsOptionalPerCall(): void
+    {
+        $pdo = $this->makeDatabase()->pdo;
+        $captured = ['filter' => null, 'comment' => null, 'stateId' => null];
+        $issues = $this->issues();
+        $settings = $this->storedSettings($pdo);
+        $sync = $this->makeSync($pdo, $settings, $captured, $issues);
+        $sync->sync();
+        $settings->update(['status_writeback' => true]);
+        $groupId = (int) $pdo->query("SELECT id FROM error_groups WHERE external_id='lin-1'")->fetchColumn();
+
+        $writeback = $sync->onStatusChanged($groupId, 'fixed', 'Patched the handler.', false);
+        self::assertTrue($writeback['attempted']);
+        self::assertFalse($writeback['commented'], 'comment=false skips the createComment call entirely.');
+        self::assertTrue($writeback['transitioned'], 'The state transition still happens without a comment.');
+        self::assertNull($captured['comment']);
+        self::assertSame('st-done', $captured['stateId']);
+    }
+
+    public function testBulkPushCurrentStatusBypassesTheWritebackSetting(): void
+    {
+        $pdo = $this->makeDatabase()->pdo;
+        $captured = ['filter' => null, 'comment' => null, 'stateId' => null];
+        $issues = $this->issues();
+        $settings = $this->storedSettings($pdo); // status_writeback left false/default
+        $sync = $this->makeSync($pdo, $settings, $captured, $issues);
+        $sync->sync();
+        $groupId = (int) $pdo->query("SELECT id FROM error_groups WHERE external_id='lin-1'")->fetchColumn();
+        (new WorkflowService($pdo))->change($groupId, 'fixed', 'Patched locally while write-back was off.');
+
+        $push = $sync->pushCurrentStatus($groupId, true);
+        self::assertTrue($push['attempted']);
+        self::assertTrue($push['ok']);
+        self::assertTrue($push['commented']);
+        self::assertTrue($push['transitioned']);
+        self::assertStringContainsString('Fixed', (string) $captured['comment']);
+
+        $manualId = (new ManualIssueService($pdo))->create(['title' => 'Local only', 'kind' => 'task', 'severity' => 'INFO']);
+        self::assertFalse($sync->pushCurrentStatus($manualId)['attempted'], 'Only Linear-sourced issues can be pushed.');
+    }
+
+    public function testLinearPushRouteIsGatedAndDispatchesToEveryRequestedId(): void
+    {
+        $pdo = $this->makeDatabase()->pdo;
+        Config::load(['auth' => ['token' => ''], 'linear' => ['secret' => 'deployment-secret']]);
+        $manualId = (new ManualIssueService($pdo))->create(['title' => 'Local only', 'kind' => 'task', 'severity' => 'INFO']);
+
+        // Not enabled yet — the route 404s like the other Linear routes do.
+        $controller = new ApiController($pdo, $this->workspace, $this->workspace, $this->workspace);
+        $disabled = $controller->handle(new LogLensRequest(
+            'POST', ['api' => 'linear-push'], ['ids' => [$manualId]], ['host' => 'log-lens.test'],
+        ));
+        self::assertSame(404, $disabled->status);
+
+        $this->storedSettings($pdo);
+        // A non-Linear issue resolves without ever touching the network (no
+        // external_id to push to) — exercises the route/plugin wiring itself
+        // without depending on a real Linear API call.
+        $enabled = (new ApiController($pdo, $this->workspace, $this->workspace, $this->workspace))->handle(new LogLensRequest(
+            'POST', ['api' => 'linear-push'], ['ids' => [$manualId]], ['host' => 'log-lens.test'],
+        ));
+        self::assertSame(200, $enabled->status);
+        self::assertSame(1, $enabled->data['requested']);
+        self::assertSame(0, $enabled->data['pushed']);
+        self::assertFalse($enabled->data['results'][$manualId]['attempted']);
     }
 
     public function testWebhookRejectsForgedSignature(): void

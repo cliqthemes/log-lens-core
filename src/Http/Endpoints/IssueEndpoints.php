@@ -165,12 +165,16 @@ final class IssueEndpoints
         $groupId = (int) ($data['id'] ?? 0);
         $status = (string) ($data['status'] ?? '');
         $note = (string) ($data['note'] ?? '');
+        // "Also comment on Linear" — on by default, but the caller (e.g. the
+        // Inspector's status control) can turn it off for a status-only
+        // write-back with no comment.
+        $comment = filter_var($data['comment'] ?? true, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? true;
         $result = $this->workflow->change($groupId, $status, $note, $actor->label);
 
         // Enabled plugins (e.g. Linear) may mirror the change externally
         // (no direct dependency on Linear here). A plugin
         // write-back failure never fails the local status change.
-        foreach ($this->plugins->onIssueStatusChanged($groupId, $status, $note) as $pluginId => $writeback) {
+        foreach ($this->plugins->onIssueStatusChanged($groupId, $status, $note, $comment) as $pluginId => $writeback) {
             $result[$pluginId] = $writeback;
         }
         return LogLensResponse::json($result);

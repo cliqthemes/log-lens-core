@@ -45,7 +45,7 @@ abstract class AbstractPlugin implements PluginContract
         return null;
     }
 
-    public function onIssueStatusChanged(PDO $db, int $groupId, string $status, string $note): ?array
+    public function onIssueStatusChanged(PDO $db, int $groupId, string $status, string $note, bool $comment = true): ?array
     {
         return null;
     }

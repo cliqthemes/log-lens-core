@@ -172,7 +172,7 @@ final class FailingPlugin extends AbstractPlugin
         }
     }
 
-    public function onIssueStatusChanged(PDO $db, int $groupId, string $status, string $note): ?array
+    public function onIssueStatusChanged(PDO $db, int $groupId, string $status, string $note, bool $comment = true): ?array
     {
         if (self::$fail) {
             throw new RuntimeException(self::$message);

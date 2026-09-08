@@ -45,7 +45,15 @@ final class LinearSyncService
     }
 
     /**
-     * Pull every matching issue and upsert it. Returns a per-run summary.
+     * Pull one bounded batch of matching issues and upsert them, resuming from
+     * wherever the previous call left off (see {@see LinearSettingsService::
+     * syncState()}). A workspace with more matches than one batch needs
+     * several calls to fully backfill — each returns `has_more: true` until
+     * the whole set has been pulled at least once; every call after that is
+     * incremental (issues updated since the last full pass only). No new
+     * background-worker infrastructure: this reuses the existing
+     * request-per-call model, so "several iterations" just means calling
+     * sync() again (manually, via the webhook, or any future scheduler).
      */
     public function sync(): array
     {
@@ -53,36 +61,72 @@ final class LinearSyncService
             throw new InvalidArgumentException('The Linear integration is not enabled for this application.');
         }
         $client = $this->client();
-        $filter = $this->buildFilter();
-        $issues = $client->fetchIssues($filter);
+        $userFilter = $this->buildFilter();
+        $state = $this->settings->syncState();
+        $wasComplete = $state['backfill_complete'];
+
+        // Mid-pass, reuse the bound frozen when this pass started rather than
+        // the (possibly newer) committed high-water mark, so a burst of
+        // updates arriving between calls of the same pass isn't half-applied.
+        $floor = $wasComplete ? ($state['cursor'] !== null ? $state['sync_floor'] : $state['synced_through']) : null;
+        $filter = $floor !== null ? $this->withUpdatedSince($userFilter, $floor) : $userFilter;
+
+        $page = $client->fetchIssues(
+            $filter,
+            $state['cursor'],
+            Config::int('linear.sync_max_pages', 5),
+            Config::int('linear.sync_page_size', 50),
+        );
 
         $created = 0;
         $updated = 0;
         $tagsCreated = 0;
-        foreach ($issues as $issue) {
+        $maxSeen = null;
+        foreach ($page['issues'] as $issue) {
             $result = $this->upsertIssue($issue);
             $created += $result['created'];
             $updated += $result['updated'];
             $tagsCreated += $result['tags_created'];
+            $issueUpdatedAt = (string) ($issue['updatedAt'] ?? '');
+            if ($issueUpdatedAt !== '' && ($maxSeen === null || strtotime($issueUpdatedAt) > strtotime($maxSeen))) {
+                $maxSeen = $issueUpdatedAt;
+            }
+        }
+
+        if ($page['has_more']) {
+            $this->settings->recordSyncProgress($page['next_cursor'], $wasComplete, $state['synced_through'], $wasComplete ? $floor : null);
+        } else {
+            $this->settings->recordSyncProgress(null, true, $maxSeen ?? $floor ?? gmdate('Y-m-d H:i:s'), null);
         }
 
         return [
             'ok' => true,
-            'pulled' => count($issues),
+            'pulled' => count($page['issues']),
             'created' => $created,
             'updated' => $updated,
             'tags_created' => $tagsCreated,
             'synced_at' => gmdate('Y-m-d H:i:s'),
+            'phase' => $wasComplete ? 'incremental' : 'backfill',
+            'has_more' => $page['has_more'],
+            'backfill_complete' => $page['has_more'] ? $wasComplete : true,
         ];
+    }
+
+    /** AND an "updated since" bound onto a user filter, whatever shape it has. */
+    private function withUpdatedSince(array $filter, string $since): array
+    {
+        return ['and' => [$filter, ['updatedAt' => ['gt' => $since]]]];
     }
 
     /**
      * Link a Log Lens status change back to Linear for a linear-sourced issue.
-     * Always comments; additionally transitions the Linear workflow state for
-     * terminal/started statuses when a matching state exists. Never throws —
-     * write-back must not break the local status change.
+     * Optionally comments (callers decide per status-change, e.g. an "also
+     * comment on Linear" checkbox — see IssueEndpoints::issueStatus());
+     * additionally transitions the Linear workflow state for terminal/started
+     * statuses when a matching state exists. Never throws — write-back must
+     * not break the local status change.
      */
-    public function onStatusChanged(int $groupId, string $status, string $note = ''): array
+    public function onStatusChanged(int $groupId, string $status, string $note = '', bool $comment = true): array
     {
         if (!$this->settings->statusWritebackEnabled()) {
             return ['attempted' => false];
@@ -98,14 +142,55 @@ final class LinearSyncService
         $result = ['attempted' => true, 'ok' => false, 'commented' => false, 'transitioned' => false];
         try {
             $client = $this->client();
-            $label = ucwords(str_replace('_', ' ', $status));
-            $body = "Log Lens marked this issue **{$label}**.";
-            if (trim($note) !== '') {
-                $body .= "\n\n> " . trim($note);
+            if ($comment) {
+                $label = ucwords(str_replace('_', ' ', $status));
+                $body = "Log Lens marked this issue **{$label}**.";
+                if (trim($note) !== '') {
+                    $body .= "\n\n> " . trim($note);
+                }
+                $client->createComment($externalId, $body);
+                $result['commented'] = true;
             }
-            $client->createComment($externalId, $body);
-            $result['commented'] = true;
 
+            $targetType = self::STATUS_TO_STATE_TYPE[$status] ?? null;
+            if ($targetType !== null) {
+                $result['transitioned'] = $this->transition($client, $externalId, $targetType);
+            }
+            $result['ok'] = true;
+        } catch (\Throwable $exception) {
+            $result['error'] = $exception->getMessage();
+        }
+        return $result;
+    }
+
+    /**
+     * Push a Linear-sourced issue's *current* local status to Linear right
+     * now, regardless of whether write-back was enabled when that status was
+     * originally set (the bulk "push status to Linear" action — see
+     * LinearPlugin::push()). Unlike onStatusChanged(), this bypasses the
+     * status_writeback setting: it's an explicit, one-off operator action,
+     * not an automatic side effect of a status change.
+     */
+    public function pushCurrentStatus(int $groupId, bool $comment = false): array
+    {
+        $row = $this->db->selectOne(
+            "SELECT external_id, status FROM error_groups WHERE id=? AND origin='" . IssueOrigin::LINEAR . "' AND external_source=?",
+            [$groupId, self::SOURCE],
+        );
+        $externalId = (string) ($row['external_id'] ?? '');
+        if ($externalId === '') {
+            return ['attempted' => false];
+        }
+        $status = (string) ($row['status'] ?? '');
+
+        $result = ['attempted' => true, 'ok' => false, 'commented' => false, 'transitioned' => false];
+        try {
+            $client = $this->client();
+            if ($comment) {
+                $label = ucwords(str_replace('_', ' ', $status));
+                $client->createComment($externalId, "Log Lens marked this issue **{$label}**.");
+                $result['commented'] = true;
+            }
             $targetType = self::STATUS_TO_STATE_TYPE[$status] ?? null;
             if ($targetType !== null) {
                 $result['transitioned'] = $this->transition($client, $externalId, $targetType);

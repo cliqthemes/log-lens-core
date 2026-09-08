@@ -128,7 +128,7 @@ final class PluginManager
      *
      * @return array<string,array<string,mixed>> keyed by the reacting plugin's id
      */
-    public function onIssueStatusChanged(int $groupId, string $status, string $note): array
+    public function onIssueStatusChanged(int $groupId, string $status, string $note, bool $comment = true): array
     {
         $results = [];
         foreach (PluginRegistry::all() as $plugin) {
@@ -136,7 +136,7 @@ final class PluginManager
                 continue;
             }
             try {
-                $result = $plugin->onIssueStatusChanged($this->pdo, $groupId, $status, $note);
+                $result = $plugin->onIssueStatusChanged($this->pdo, $groupId, $status, $note, $comment);
                 $this->clearFailure($plugin->id());
             } catch (\Throwable $exception) {
                 $this->recordFailure($plugin->id(), 'onIssueStatusChanged', $exception);
