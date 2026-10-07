@@ -89,7 +89,7 @@ final class AlertService
         $row = $this->channelRow($id);
         $result = $this->notifier->deliver($row['type'], SecretBox::decrypt($row['target_token']), [
             'trigger' => 'test',
-            'summary' => 'Log Lens alerting is connected.',
+            'summary' => 'Alerting is connected.',
             'items' => [['severity' => 'INFO', 'title' => 'This is a test notification.']],
             'url' => Config::string('LOG_LENS_URL', ''),
         ]);

@@ -144,7 +144,7 @@ final class LinearSyncService
             $client = $this->client();
             if ($comment) {
                 $label = ucwords(str_replace('_', ' ', $status));
-                $body = "Log Lens marked this issue **{$label}**.";
+                $body = "Marked **{$label}**.";
                 if (trim($note) !== '') {
                     $body .= "\n\n> " . trim($note);
                 }
@@ -188,7 +188,7 @@ final class LinearSyncService
             $client = $this->client();
             if ($comment) {
                 $label = ucwords(str_replace('_', ' ', $status));
-                $client->createComment($externalId, "Log Lens marked this issue **{$label}**.");
+                $client->createComment($externalId, "Marked **{$label}**.");
                 $result['commented'] = true;
             }
             $targetType = self::STATUS_TO_STATE_TYPE[$status] ?? null;

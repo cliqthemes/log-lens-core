@@ -72,7 +72,7 @@ final class Notifier
             '%s *%s* — %s',
             $icons[$trigger] ?? '🔔',
             $labels[$trigger] ?? ucfirst($trigger),
-            (string) ($alert['summary'] ?? 'Alert from Log Lens'),
+            (string) ($alert['summary'] ?? 'Alert'),
         );
         foreach (($alert['items'] ?? []) as $item) {
             $lines[] = sprintf(
