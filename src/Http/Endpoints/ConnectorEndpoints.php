@@ -33,7 +33,7 @@ final class ConnectorEndpoints
         private readonly string $projectRoot,
         private readonly string $applicationId,
     ) {
-        $this->connectors = new ConnectorService($db);
+        $this->connectors = new ConnectorService($db, stateDirectory: $sourcesDirectory);
         $this->sync = new ConnectorSyncService($db, $sourcesDirectory);
         $this->importer = new LogImportService($db);
     }

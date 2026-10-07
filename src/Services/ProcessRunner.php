@@ -51,7 +51,11 @@ final class ProcessRunner
         $exitCode = $status['exitcode'];
         proc_close($process);
         if ($exitCode !== 0) {
-            throw new RuntimeException($this->failureMessage($command, $stderr, (int) $exitCode));
+            throw new ProcessFailedException(
+                $this->failureMessage($command, $stderr, (int) $exitCode),
+                (int) $exitCode,
+                trim($stderr),
+            );
         }
         return $stdout;
     }

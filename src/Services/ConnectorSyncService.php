@@ -111,7 +111,7 @@ final class ConnectorSyncService
                 $this->runs->activate($runId, $connectorId);
             }
             $this->runs->supersedeOthers($runId, $connectorId);
-            $adapter = $this->factory->make($connector);
+            $adapter = $this->factory->make($connector, $this->sourcesDirectory);
             $plan = $this->plan($connector, $adapter);
             if ($expectedSnapshot !== null && !hash_equals($expectedSnapshot, $plan->snapshot())) {
                 throw new RuntimeException(
@@ -124,6 +124,7 @@ final class ConnectorSyncService
             $this->recordConnectorStatus($connectorId, 'success', null);
             return $result;
         } catch (\Throwable $exception) {
+            $this->logFailure($connectorId, $runId, $exception);
             $this->runs->finishFailed($runId, $exception->getMessage());
             $this->recordConnectorStatus($connectorId, 'failed', $exception->getMessage());
             throw $exception;
@@ -283,14 +284,14 @@ final class ConnectorSyncService
      */
     private function plan(array $connector, ?LogSourceConnectorInterface $adapter = null): SyncPlan
     {
-        $adapter ??= $this->factory->make($connector);
+        $adapter ??= $this->factory->make($connector, $this->sourcesDirectory);
         return $this->planner->plan($connector, $adapter, $adapter->discover());
     }
 
     /** @return array<string,mixed> */
     private function enabledConnector(int $connectorId): array
     {
-        $connector = (new ConnectorService($this->db, $this->factory))->row($connectorId);
+        $connector = (new ConnectorService($this->db, $this->factory, $this->sourcesDirectory))->row($connectorId);
         if (!(bool) $connector['enabled']) {
             throw new RuntimeException('Connector is disabled.');
         }
@@ -363,6 +364,28 @@ final class ConnectorSyncService
      *
      * @return resource
      */
+    /**
+     * Append the full failure (class, message, remote stderr, trace) to
+     * `<sources>/.logs/sync-errors.log`. The run row keeps only a short,
+     * response-safe message; this file is where the real cause lives.
+     */
+    private function logFailure(int $connectorId, int $runId, \Throwable $exception): void
+    {
+        $entry = '[' . gmdate('Y-m-d H:i:s') . " UTC] connector={$connectorId} run={$runId} "
+            . $exception::class . ': ' . $exception->getMessage() . "\n";
+        if ($exception instanceof ProcessFailedException && $exception->stderr !== '') {
+            $entry .= "  stderr: " . str_replace("\n", "\n          ", $exception->stderr) . "\n";
+        }
+        $entry .= '  at ' . $exception->getFile() . ':' . $exception->getLine() . "\n"
+            . '  ' . str_replace("\n", "\n  ", $exception->getTraceAsString()) . "\n";
+        error_log('[log-lens] sync failed: ' . $exception->getMessage());
+        $directory = rtrim($this->sourcesDirectory, '/') . '/.logs';
+        if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+            return;
+        }
+        @file_put_contents($directory . '/sync-errors.log', $entry, FILE_APPEND | LOCK_EX);
+    }
+
     private function lock(int $connectorId)
     {
         $directory = rtrim($this->sourcesDirectory, '/') . '/.locks';

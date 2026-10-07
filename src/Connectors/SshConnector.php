@@ -17,6 +17,7 @@ final class SshConnector implements LogSourceConnectorInterface
     public function __construct(
         private readonly array $config,
         private readonly ProcessRunner $runner = new ProcessRunner(),
+        private readonly ?string $stateDirectory = null,
     ) {
     }
 
@@ -161,7 +162,6 @@ PHP;
         $command = [
             'ssh',
             '-o', 'BatchMode=yes',
-            '-o', 'StrictHostKeyChecking=yes',
             '-o', 'ConnectTimeout=' . Config::int('ssh.connect_timeout', 10),
             '-p', (string) $port,
         ];
@@ -171,9 +171,31 @@ PHP;
         }
         $knownHosts = $this->localPath($this->config['known_hosts_file'] ?? '', 'Known-hosts file path');
         if ($knownHosts !== '') {
-            array_push($command, '-o', 'UserKnownHostsFile=' . $knownHosts);
+            // An explicit file is the operator's pinned trust anchor: unknown or changed keys fail.
+            array_push($command, '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' . $knownHosts);
+            return $command;
+        }
+        $managed = $this->managedKnownHosts();
+        if ($managed !== null) {
+            // The process user's ~/.ssh/known_hosts is not reliable (containers, FPM users, Lerd/Docker), so
+            // keep a Log Lens-owned file: a new host is trusted on first use, a CHANGED key is still refused.
+            array_push($command, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=' . $managed);
+        } else {
+            array_push($command, '-o', 'StrictHostKeyChecking=yes');
         }
         return $command;
+    }
+
+    private function managedKnownHosts(): ?string
+    {
+        if ($this->stateDirectory === null || $this->stateDirectory === '') {
+            return null;
+        }
+        $directory = rtrim($this->stateDirectory, '/') . '/.ssh';
+        if (!is_dir($directory) && !@mkdir($directory, 0700, true) && !is_dir($directory)) {
+            return null;
+        }
+        return $directory . '/known_hosts';
     }
 
     /**

@@ -32,8 +32,11 @@ final class ConnectorFactory
         self::$registered = [];
     }
 
-    /** @param array<string,mixed> $connector */
-    public function make(array $connector): LogSourceConnectorInterface
+    /**
+     * @param array<string,mixed> $connector
+     * @param ?string $stateDirectory Writable per-application directory the connector may keep state in (e.g. SSH known hosts).
+     */
+    public function make(array $connector, ?string $stateDirectory = null): LogSourceConnectorInterface
     {
         $config = json_decode((string) ($connector['config_json'] ?? '{}'), true);
         if (!is_array($config)) {
@@ -42,12 +45,15 @@ final class ConnectorFactory
         $type = (string) ($connector['type'] ?? '');
         $factory = self::$registered[$type] ?? match ($type) {
             'local' => static fn (array $config): LogSourceConnectorInterface => new LocalDirectoryConnector($config),
-            'ssh' => static fn (array $config): LogSourceConnectorInterface => new SshConnector($config),
+            'ssh' => static fn (array $config): LogSourceConnectorInterface => new SshConnector(
+                $config,
+                stateDirectory: $stateDirectory,
+            ),
             default => null,
         };
         if ($factory === null) {
             throw new InvalidArgumentException('Unsupported connector type.');
         }
-        return $factory($config);
+        return $factory($config, $stateDirectory);
     }
 }

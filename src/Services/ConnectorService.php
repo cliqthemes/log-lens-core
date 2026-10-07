@@ -22,6 +22,7 @@ final class ConnectorService
     public function __construct(
         Connection|PDO $db,
         private readonly ConnectorFactory $factory = new ConnectorFactory(),
+        private readonly ?string $stateDirectory = null,
     ) {
         $this->db = $db instanceof Connection ? $db : new PdoConnection($db, Dialects::active());
     }
@@ -91,7 +92,7 @@ final class ConnectorService
     /** @return array{ok:bool,message:string} */
     public function test(int $id): array
     {
-        return $this->factory->make($this->findRow($id))->test();
+        return $this->factory->make($this->findRow($id), $this->stateDirectory)->test();
     }
 
     /** @return array<string,mixed> */
